@@ -206,7 +206,8 @@ class UI(builder.Builder):
         self.show_bigbuttons = self.config.getboolean('presenter', 'show_bigbuttons')
 
         # Surface cache
-        self.cache = surfacecache.SurfaceCache(self.doc, self.config.getint('cache', 'maxpages'))
+        self.cache = surfacecache.SurfaceCache(self.doc, self.config.getint('cache', 'maxpages'),
+                                              self._cache_rendered)
 
         # Make and populate windows
         self.load_ui('presenter')
@@ -629,7 +630,8 @@ class UI(builder.Builder):
         if not event.send_event:
             return
 
-        self.cache.resize_widget(widget.get_name().rstrip('0123456789'), event.width, event.height)
+        scale = widget.get_window().get_scale_factor() if widget.get_window() is not None else 1
+        self.cache.resize_widget(widget.get_name().rstrip('0123456789'), event.width, event.height, scale)
 
         if widget is self.c_da:
             self.medias.resize('content')
@@ -1312,36 +1314,14 @@ class UI(builder.Builder):
 
         pb = self.cache.get(name, nb)
         if pb is None:
-            if self.resize_panes and widget in self.p_das_next + [self.p_da_cur, self.p_da_notes]:
-                # too slow to render here when resize_panes things
-                return
+            # Never render Poppler pages from the GTK draw callback.  Queue the
+            # work and paint a cheap fallback until the worker posts the result.
+            if not (self.resize_panes and widget in self.p_das_next + [self.p_da_cur, self.p_da_notes]):
+                self.cache.request(name, nb, ww, wh, scale, wtype, zoom_matrix)
+            pb = self.cache.get_fallback(name, ww, wh, scale)
 
-            # Cache miss: render the page, and save it to the cache
-            try:
-                pb = window.create_similar_image_surface(cairo.Format.RGB24, ww * scale, wh * scale, scale)
-            except cairo.Error:
-                logger.warning('Failed creating an RGB24 surface sized {}x{} scale {} for widget {}'
-                               .format(ww * scale, wh * scale, scale, name), exc_info=True)
-                if widget is self.c_da:
-                    cairo_context.save()
-                    cairo_context.set_source_rgb(0, 0, 0)
-                    cairo_context.fill()
-                    cairo_context.paint()
-                    cairo_context.restore()
-                return
-
-            cairo_prerender = cairo.Context(pb)
-            cairo_prerender.transform(zoom_matrix)
-            page.render_cairo(cairo_prerender, ww, wh, wtype)
-
-            self.cache.put(name, nb, pb)
-
-            cairo_context.set_source_surface(pb, 0, 0)
-            cairo_context.paint()
-        else:
-            # Cache hit: draw the surface from the cache to the widget
-            cairo_context.set_source_surface(pb, 0, 0)
-            cairo_context.paint()
+        cairo_context.set_source_surface(pb, 0, 0)
+        cairo_context.paint()
 
         if widget is self.c_da or widget is self.p_da_cur or widget is self.scribbler.scribble_p_da:
             cairo_context.save()
@@ -1356,6 +1336,19 @@ class UI(builder.Builder):
             # do not use the zoom matrix for the pointer, it is relative to the screen not the slide
             self.laser.render_pointer(cairo_context, ww, wh)
 
+
+    def _cache_rendered(self, widget_name, page_nb):
+        """Queue only drawing areas affected by a completed background render."""
+        widgets = [self.c_da, self.p_da_cur, self.p_da_notes]
+        widgets += list(self.p_das_next or [])
+        if self.scribbler is not None:
+            widgets.append(self.scribbler.scribble_p_da)
+        for widget in widgets:
+            if widget is None:
+                continue
+            name = widget.get_name().rstrip('0123456789')
+            if name == widget_name and widget.get_mapped():
+                widget.queue_draw()
 
     def clear_zoom_cache(self):
         """ Callback to clear the cache of zoomed widgets.

@@ -130,6 +130,9 @@ class Pympress(Gtk.Application):
             # before quitting, re-enable the screensaver
             self.gui.set_screensaver(False)
 
+        if self.gui is not None and self.gui.cache is not None:
+            self.gui.cache.close()
+
         Gtk.Application.quit(self)
         return False
 
