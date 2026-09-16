@@ -170,7 +170,7 @@ class SurfaceCache(object):
             return GLib.SOURCE_REMOVE
         width, height = self.surface_size[widget_name]
         if width > 0 and height > 0:
-            self.request(widget_name, page_nb, width, height, 1, self.surface_type[widget_name])
+            self.request(widget_name, page_nb, width, height, 1, self.surface_type[widget_name], priority=10)
         return GLib.SOURCE_REMOVE
 
     def _is_current(self, generation, widget_name, page_nb, width, height, scale):
