@@ -84,8 +84,13 @@ class RenderWorker(threading.Thread):
                 doc = self._get_document(uri, generation)
                 if doc is None:
                     continue
-                page = doc.page(page_nb)
-                if page is None or not page.can_render():
+                # Deck thumbnails do not need links, media or annotations.
+                # Avoid constructing the UI-facing Page wrapper for them;
+                # current/notes pages retain the wrapper for annotation
+                # semantics.
+                raw_page = doc.doc.get_page(page_nb) if widget_name == 'deck' else None
+                page = None if raw_page is not None else doc.page(page_nb)
+                if raw_page is None and (page is None or not page.can_render()):
                     continue
 
                 pixel_width = max(1, int(round(width * scale)))
@@ -95,7 +100,21 @@ class RenderWorker(threading.Thread):
                 context = cairo.Context(surface)
                 if matrix is not None:
                     context.transform(cairo.Matrix(*matrix))
-                page.render_cairo(context, width, height, wtype)
+                if raw_page is None:
+                    page.render_cairo(context, width, height, wtype)
+                else:
+                    pw, ph = raw_page.get_size()
+                    render_width, render_height = wtype.scale().from_screen(pw, ph)
+                    render_scale = min(width / render_width, height / render_height)
+                    context.set_source_rgb(1, 1, 1)
+                    context.scale(render_scale, render_scale)
+                    context.rectangle(0, 0, render_width, render_height)
+                    context.fill()
+                    if wtype == document.PdfPage.RIGHT:
+                        context.translate(-pw, 0)
+                    elif wtype == document.PdfPage.BOTTOM:
+                        context.translate(0, -ph)
+                    raw_page.render(context)
                 context = None
                 surface.flush()
                 self.result_callback(generation, widget_name, page_nb, width, height, scale, surface)
