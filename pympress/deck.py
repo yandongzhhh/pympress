@@ -262,6 +262,12 @@ class Overview(builder.Builder):
             self.deck_batch_source = 0
             return GLib.SOURCE_REMOVE
 
+        # Keep the queue bounded.  GTK remains responsive and a user leaving
+        # the overview does not leave a long tail of useless thumbnails.
+        if self.cache.pending_count('deck') > self.deck_batch_size:
+            self.deck_batch_source = GLib.timeout_add(25, self.prerender_batch)
+            return GLib.SOURCE_REMOVE
+
         end = min(self.deck_batch_index + self.deck_batch_size, len(self.deck_batch_pages))
         for da in self.deck_batch_pages[self.deck_batch_index:end]:
             self.cache.renderer('deck', int(da.get_name()[4:]))
@@ -270,7 +276,8 @@ class Overview(builder.Builder):
         if end >= len(self.deck_batch_pages):
             self.deck_batch_source = 0
             return GLib.SOURCE_REMOVE
-        return GLib.SOURCE_CONTINUE
+        self.deck_batch_source = GLib.timeout_add(25, self.prerender_batch)
+        return GLib.SOURCE_REMOVE
 
     def prerender(self, da):
         """Compatibility entry point for callers that request one thumbnail."""
