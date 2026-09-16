@@ -144,6 +144,12 @@ class SurfaceCache(object):
             return None
         return (matrix.xx, matrix.yx, matrix.xy, matrix.yy, matrix.x0, matrix.y0)
 
+    def pending_count(self, widget_name=None):
+        """Return the number of queued renders, optionally for one cache."""
+        if widget_name is None:
+            return len(self.pending)
+        return sum(1 for key in self.pending if key[0] == widget_name)
+
     def request(self, widget_name, page_nb, width, height, scale, wtype, matrix=None, priority=0):
         if widget_name not in self.locks or width <= 0 or height <= 0 or self.doc_uri is None:
             return
