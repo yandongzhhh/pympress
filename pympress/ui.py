@@ -1341,6 +1341,8 @@ class UI(builder.Builder):
         """Queue only drawing areas affected by a completed background render."""
         widgets = [self.c_da, self.p_da_cur, self.p_da_notes]
         widgets += list(self.p_das_next or [])
+        if self.deck is not None and widget_name == 'deck':
+            widgets += list(self.deck.deck_da_list)
         if self.scribbler is not None:
             widgets.append(self.scribbler.scribble_p_da)
         for widget in widgets:

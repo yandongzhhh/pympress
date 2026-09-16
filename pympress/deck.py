@@ -74,6 +74,14 @@ class Overview(builder.Builder):
     all_pages = False
     #: `int` How large (at most) to make rows
     max_row_size = 6
+    #: Source id for the next thumbnail batch
+    deck_batch_source = 0
+    #: Pages waiting for progressive thumbnail rendering
+    deck_batch_pages = None
+    #: Number of pages already submitted in the current batch sequence
+    deck_batch_index = 0
+    #: Number of thumbnails submitted per GTK idle turn
+    deck_batch_size = 8
 
     #: The :class:`~Gtk.DrawingArea` in the content window
     c_da = None
@@ -226,18 +234,46 @@ class Overview(builder.Builder):
             # resize grid and cache
             self.grid_size = rows, cols
 
-        for da in self.deck_da_list:
-            GLib.idle_add(self.prerender, da)
-
         self.deck_grid.show_all()
+        self.start_progressive_prerender()
 
+
+    def start_progressive_prerender(self):
+        """Submit thumbnails progressively instead of flooding the render queue."""
+        if self.deck_batch_source:
+            GLib.source_remove(self.deck_batch_source)
+            self.deck_batch_source = 0
+
+        pages = list(self.deck_da_list)
+        # Prefer thumbnails near the current viewport.  This makes the first
+        # visible part of a long overview useful while the rest is rendered.
+        adjustment = self.deck_viewport.get_vadjustment()
+        viewport_top = adjustment.get_value() if adjustment is not None else 0
+        viewport_height = self.deck_viewport.get_allocated_height()
+        pages.sort(key=lambda da: abs(da.get_allocation().y - viewport_top - viewport_height / 2))
+        self.deck_batch_pages = pages
+        self.deck_batch_index = 0
+        self.deck_batch_source = GLib.idle_add(self.prerender_batch,
+                                               priority=GLib.PRIORITY_LOW)
+
+    def prerender_batch(self):
+        """Submit a small thumbnail batch, yielding to GTK between batches."""
+        if not self.deck_mode or self.deck_batch_pages is None:
+            self.deck_batch_source = 0
+            return GLib.SOURCE_REMOVE
+
+        end = min(self.deck_batch_index + self.deck_batch_size, len(self.deck_batch_pages))
+        for da in self.deck_batch_pages[self.deck_batch_index:end]:
+            self.cache.renderer('deck', int(da.get_name()[4:]))
+            da.queue_draw()
+        self.deck_batch_index = end
+        if end >= len(self.deck_batch_pages):
+            self.deck_batch_source = 0
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
 
     def prerender(self, da):
-        """ Perform in-cache rendering
-
-        Args:
-            da (:class:`~Gtk.DrawingArea`):  the widget for which we’re rendering
-        """
+        """Compatibility entry point for callers that request one thumbnail."""
         self.cache.renderer('deck', int(da.get_name()[4:]))
         da.queue_draw()
         return GLib.SOURCE_REMOVE
@@ -253,8 +289,8 @@ class Overview(builder.Builder):
         page_num = int(widget.get_name()[4:])
         pb = self.cache.get('deck', page_num)
         if pb is None:
-            # We’ll redraw later
-            widget.queue_draw()
+            # The render worker will queue a redraw when the thumbnail is ready.
+            # Do not spin the GTK main loop while waiting.
             return
 
         window = widget.get_window()
@@ -346,6 +382,11 @@ class Overview(builder.Builder):
             return False
 
         self.deck_mode = False
+        if self.deck_batch_source:
+            GLib.source_remove(self.deck_batch_source)
+            self.deck_batch_source = 0
+        self.deck_batch_pages = None
+        self.cache.clear_cache('deck')
 
         self.load_layout(None)
         self.deck_off_render.add(self.deck_viewport)
