@@ -245,12 +245,15 @@ class Overview(builder.Builder):
             self.deck_batch_source = 0
 
         pages = list(self.deck_da_list)
-        # Prefer thumbnails near the current viewport.  This makes the first
-        # visible part of a long overview useful while the rest is rendered.
+        # GTK may report the adjustment at its previous maximum while the
+        # overview is being rebuilt.  Sorting by allocation in that state can
+        # accidentally make the last page the first render.  Start
+        # deterministically from the first page; scrolling can still request
+        # any missing thumbnail through the normal draw callback.
+        pages.sort(key=lambda da: int(da.get_name()[4:]))
         adjustment = self.deck_viewport.get_vadjustment()
-        viewport_top = adjustment.get_value() if adjustment is not None else 0
-        viewport_height = self.deck_viewport.get_allocated_height()
-        pages.sort(key=lambda da: abs(da.get_allocation().y - viewport_top - viewport_height / 2))
+        if adjustment is not None:
+            adjustment.set_value(0)
         self.deck_batch_pages = pages
         self.deck_batch_index = 0
         self.deck_batch_source = GLib.idle_add(self.prerender_batch,
