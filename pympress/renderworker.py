@@ -5,7 +5,8 @@ Poppler documents are deliberately owned by this worker and are never shared
 with the GTK thread or another renderer.
 """
 import logging
-import queue
+import heapq
+import itertools
 import threading
 
 import cairo
@@ -18,10 +19,13 @@ logger = logging.getLogger(__name__)
 class RenderWorker(threading.Thread):
     """Render one PDF page at a time and return Cairo image surfaces."""
 
-    def __init__(self, result_callback):
+    def __init__(self, result_callback, is_current=None):
         super(RenderWorker, self).__init__(name='pympress-renderer', daemon=True)
         self.result_callback = result_callback
-        self.jobs = queue.Queue()
+        self.is_current = is_current or (lambda *args: True)
+        self.jobs = []
+        self.jobs_lock = threading.Condition()
+        self.sequence = itertools.count()
         self.stop_requested = False
         self.worker_doc = None
         self.worker_uri = None
@@ -33,13 +37,18 @@ class RenderWorker(threading.Thread):
         with self.generation_lock:
             self.latest_generation = generation
 
-    def submit(self, uri, generation, widget_name, page_nb, width, height, scale, wtype, matrix=None):
-        self.jobs.put((uri, generation, widget_name, page_nb, width, height,
-                       scale, wtype, matrix))
+    def submit(self, uri, generation, widget_name, page_nb, width, height, scale,
+               wtype, matrix=None, priority=10):
+        job = (priority, next(self.sequence), uri, generation, widget_name,
+               page_nb, width, height, scale, wtype, matrix)
+        with self.jobs_lock:
+            heapq.heappush(self.jobs, job)
+            self.jobs_lock.notify()
 
     def stop(self):
         self.stop_requested = True
-        self.jobs.put(None)
+        with self.jobs_lock:
+            self.jobs_lock.notify()
 
     def _get_document(self, uri, generation):
         if uri is None:
@@ -60,10 +69,14 @@ class RenderWorker(threading.Thread):
 
     def run(self):
         while not self.stop_requested:
-            job = self.jobs.get()
-            if job is None:
-                break
-            uri, generation, widget_name, page_nb, width, height, scale, wtype, matrix = job
+            with self.jobs_lock:
+                while not self.jobs and not self.stop_requested:
+                    self.jobs_lock.wait()
+                if self.stop_requested:
+                    break
+                _, _, uri, generation, widget_name, page_nb, width, height, scale, wtype, matrix = heapq.heappop(self.jobs)
+            if not self.is_current(generation, widget_name, page_nb, width, height, scale):
+                continue
             with self.generation_lock:
                 if generation < self.latest_generation:
                     continue

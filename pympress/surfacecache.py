@@ -30,9 +30,10 @@ class SurfaceCache(object):
         self.locks = {}
         self.unlimited = set()
         self.active_widgets = set()
-        self.pending = set()
+        self.pending = {}
         self.fallbacks = {}
-        self.worker = RenderWorker(self._worker_result)
+        self.last_surfaces = {}
+        self.worker = RenderWorker(self._worker_result, self._is_current)
         self.worker.start()
 
     def set_redraw_callback(self, callback):
@@ -57,6 +58,7 @@ class SurfaceCache(object):
         self.generation += 1
         self.worker.invalidate(self.generation)
         self.pending.clear()
+        self.last_surfaces.clear()
         self.clear_cache()
 
     def disable_prerender(self, widget_name):
@@ -82,16 +84,20 @@ class SurfaceCache(object):
             with self.locks[name]:
                 self.surface_cache[name].clear()
                 self.fallbacks.pop(name, None)
-        self.pending = {job for job in self.pending if job[0] not in names}
+                self.last_surfaces.pop(name, None)
+        self.pending = {key: priority for key, priority in self.pending.items()
+                        if key[0] not in names}
 
     def resize_widget(self, widget_name, width, height, scale=1):
         with self.locks[widget_name]:
             if (width, height) != self.surface_size[widget_name] or scale != self.surface_scale[widget_name]:
                 self.surface_cache[widget_name].clear()
                 self.fallbacks.pop(widget_name, None)
+                self.last_surfaces.pop(widget_name, None)
                 self.surface_size[widget_name] = (width, height)
                 self.surface_scale[widget_name] = scale
-        self.pending = {job for job in self.pending if job[0] != widget_name}
+        self.pending = {key: priority for key, priority in self.pending.items()
+                        if key[0] != widget_name}
 
     def get(self, widget_name, page_nb):
         with self.locks[widget_name]:
@@ -106,6 +112,7 @@ class SurfaceCache(object):
             cache = self.surface_cache[widget_name]
             cache[page_nb] = surface
             cache.move_to_end(page_nb)
+            self.last_surfaces[widget_name] = ((surface.get_width(), surface.get_height()), surface)
             if widget_name not in self.unlimited:
                 while len(cache) > self.max_pages:
                     cache.popitem(False)
@@ -116,6 +123,11 @@ class SurfaceCache(object):
         old = self.fallbacks.get(widget_name)
         if old is not None and old[0] == key:
             return old[1]
+        previous = self.last_surfaces.get(widget_name)
+        if previous is not None:
+            expected = (int(width * scale), int(height * scale))
+            if previous[0] == expected:
+                return previous[1]
         surface = cairo.ImageSurface(cairo.FORMAT_RGB24,
                                      max(1, int(width * scale)),
                                      max(1, int(height * scale)))
@@ -132,17 +144,17 @@ class SurfaceCache(object):
             return None
         return (matrix.xx, matrix.yx, matrix.xy, matrix.yy, matrix.x0, matrix.y0)
 
-    def request(self, widget_name, page_nb, width, height, scale, wtype, matrix=None):
+    def request(self, widget_name, page_nb, width, height, scale, wtype, matrix=None, priority=0):
         if widget_name not in self.locks or width <= 0 or height <= 0 or self.doc_uri is None:
             return
         if self.get(widget_name, page_nb) is not None:
             return
-        job = (widget_name, page_nb, self.generation, width, height, scale)
-        if job in self.pending:
+        key = (widget_name, page_nb, width, height, scale)
+        if key in self.pending and self.pending[key] <= priority:
             return
-        self.pending.add(job)
+        self.pending[key] = priority
         self.worker.submit(self.doc_uri, self.generation, widget_name, page_nb,
-                           width, height, scale, wtype, self._matrix_values(matrix))
+                           width, height, scale, wtype, self._matrix_values(matrix), priority)
 
     def prerender(self, page_nb):
         for name in tuple(self.active_widgets):
@@ -150,7 +162,7 @@ class SurfaceCache(object):
                 continue
             width, height = self.surface_size[name]
             if width > 0 and height > 0:
-                self.request(name, page_nb, width, height, self.surface_scale[name], self.surface_type[name])
+                self.request(name, page_nb, width, height, self.surface_scale[name], self.surface_type[name], priority=10)
 
     def renderer(self, widget_name, page_nb):
         """Compatibility entry point used by deck overview."""
@@ -161,6 +173,10 @@ class SurfaceCache(object):
             self.request(widget_name, page_nb, width, height, 1, self.surface_type[widget_name])
         return GLib.SOURCE_REMOVE
 
+    def _is_current(self, generation, widget_name, page_nb, width, height, scale):
+        key = (widget_name, page_nb, width, height, scale)
+        return generation == self.generation and key in self.pending
+
     def _worker_result(self, generation, widget_name, page_nb, width, height, scale, surface):
         # Poppler work is complete in the worker; cache mutation and GTK redraw
         # happen on the main loop only.
@@ -168,8 +184,8 @@ class SurfaceCache(object):
                       width, height, scale, surface)
 
     def _accept_result(self, generation, widget_name, page_nb, width, height, scale, surface):
-        self.pending = {job for job in self.pending
-                        if not (job[0] == widget_name and job[1] == page_nb)}
+        key = (widget_name, page_nb, width, height, scale)
+        self.pending.pop(key, None)
         if generation != self.generation or widget_name not in self.locks:
             return GLib.SOURCE_REMOVE
         with self.locks[widget_name]:
